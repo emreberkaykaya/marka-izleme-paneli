@@ -119,11 +119,11 @@ h2{font-family:Archivo,sans-serif;font-weight:700;font-size:18px;margin:0}
 .chip-btn{border:1px solid var(--line);background:var(--surface);color:var(--ink-2);font:600 13px "IBM Plex Sans";
   padding:6px 12px;border-radius:99px;cursor:pointer}
 .chip-btn[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:var(--surface)}
-.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,520px),1fr));gap:14px}
+.charts{display:grid;grid-template-columns:1fr;gap:14px}
 .chart-box{background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:14px 16px}
 .chart-box h3{margin:0 0 2px;font:700 14px Archivo,sans-serif}
 .chart-box p{margin:0 0 8px;font-size:12px;color:var(--muted)}
-.chart-box .cv{position:relative;height:250px}
+.chart-box .cv{position:relative;height:260px}
 
 /* tablo */
 .tbl-scroll{overflow-x:auto}
@@ -428,61 +428,68 @@ function renderCharts(){
   document.getElementById("brand-chips").innerHTML = brands.map(b =>
     `<button type="button" class="chip-btn" data-b="${esc(b)}" aria-pressed="${b === brandSel}">${esc(b)}</button>`).join("");
 
-  const st = stats(ch, brandSel, month), s = st.s, idx = st.idx;
-  const labels = idx.map(i => dayLabel(DAYS[i]));
+  const st = stats(ch, brandSel, month), s = st.s, idx = st.idx, n = st.n;
   const t = TARGET_CH.includes(ch) ? targetOf(ch, brandSel, month) : null;
-  const A = css("--ch-a"), B = css("--ch-b"), C = css("--ch-c"), M = css("--muted"), P = css("--pos");
+  const A = css("--ch-a"), B = css("--ch-b"), C = css("--ch-c"), M = css("--muted");
   const box = document.getElementById("charts");
-  const noRev = !s.hasRevenue;
+  const noRev = !s.hasRevenue, pm = prevMonth(month), pmName = monthName(pm);
+
+  // X ekseni ayın günleri (1…n): bu ay ile geçen ay aynı gün numarasında üst üste gelir.
+  const labels = Array.from({length: n}, (_, k) => `${k + 1} ${AYLAR[+month.slice(5) - 1].slice(0, 3)}`);
+  const byDay = (m, key) => {
+    const out = Array(n).fill(null);
+    idxOf(m).forEach(i => { const d = +DAYS[i].slice(8); if (d <= n) out[d - 1] = s[key][i]; });
+    return out;
+  };
+  const hasPrev = idxOf(pm).length > 0;
+  const todayCol = col => labels.map((_, k) => month === CUR_MONTH && k + 1 === +TODAY.slice(8) ? col + "66" : col);
+  const prevLine = (key, fmt) => hasPrev ? [{type: "line", label: pmName, data: byDay(pm, key), borderColor: B,
+    pointRadius: 2, pointBackgroundColor: B, borderWidth: 1.5, cubicInterpolationMode: "monotone", fmt}] : [];
+  const targetLine = (goal, fmt) => goal ? [{type: "line", label: "Günlük hedef", data: labels.map(() => goal / n),
+    borderColor: M, borderDash: [6, 5], pointRadius: 0, borderWidth: 1.5, fmt}] : [];
+  const sub = (goal) => `çubuk: ${monthName(month)}` + (hasPrev ? ` · çizgi: ${pmName} aynı gün` : "") + (goal ? " · kesikli: günlük hedef" : "");
+  const decimal = v => f2.format(v);
 
   box.innerHTML = (noRev ? "" :
-      chartBox("c-cum", "Kümülatif ciro", t && t.revenue ? "gerçekleşen · hedef çizgisi · ay sonu tahmini" : "gerçekleşen · geçen ay aynı gün") +
-      chartBox("c-daily", "Günlük ciro", "çubuk: gün · çizgi: 7 günlük ortalama" + (t && t.revenue ? " · kesikli: günlük hedef" : "")) +
-      chartBox("c-ord", "Günlük sipariş", "çubuk: gün · çizgi: 7 günlük ortalama" + (t && t.orders ? " · kesikli: günlük hedef" : ""))) +
-    chartBox("c-spend", "Günlük harcama ve ROAS", ch === "d2c" ? "Meta + Google yığılı · çizgi: ROAS (sağ eksen)" : "çubuk: harcama · çizgi: ROAS (sağ eksen)");
+      chartBox("c-cum", "Kümülatif ciro", (t && t.revenue ? "gerçekleşen · hedef çizgisi · ay sonu tahmini" : "gerçekleşen") + (hasPrev ? ` · ${pmName}` : "")) +
+      chartBox("c-daily", "Günlük ciro", sub(t && t.revenue))) +
+    chartBox("c-spend", "Günlük harcama", (ch === "d2c" ? "Meta + Google yığılı" : `çubuk: ${monthName(month)}`) + (hasPrev ? ` · çizgi: ${pmName} aynı gün` : "")) +
+    (noRev ? "" : chartBox("c-ord", "Günlük sipariş", sub(t && t.orders)));
 
-  const ma7 = arr => idx.map(i => { const w = []; for (let k = i - 6; k <= i; k++) if (k >= 0 && DAYS[k] !== TODAY) w.push(arr[k]); return DAYS[i] === TODAY || w.length < 7 ? null : sum(w) / 7; });
   const mk = (id, cfg) => { const el = document.getElementById(id); if (el) charts.push(new Chart(el, cfg)); };
 
   if (!noRev){
     // Kümülatif: gerçekleşen (bugün dahil), hedefe giden doğrusal çizgi, dünkü ortalamayla tahmin.
-    const n = st.n, allLabels = Array.from({length: n}, (_, k) => `${k + 1} ${AYLAR[+month.slice(5) - 1].slice(0, 3)}`);
     let run = 0; const cum = Array(n).fill(null);
     idx.forEach(i => { run += s.revenue[i]; cum[+DAYS[i].slice(8) - 1] = run; });
     const ds = [{label: "Gerçekleşen", data: cum, borderColor: A, backgroundColor: A + "22", fill: true, pointRadius: 0, borderWidth: 2.5, tension: .2, fmt: money}];
-    if (t && t.revenue) ds.push({label: "Hedef", data: allLabels.map((_, k) => t.revenue * (k + 1) / n), borderColor: M, borderDash: [6, 5], pointRadius: 0, borderWidth: 1.5, fmt: money});
+    if (t && t.revenue) ds.push({label: "Hedef", data: labels.map((_, k) => t.revenue * (k + 1) / n), borderColor: M, borderDash: [6, 5], pointRadius: 0, borderWidth: 1.5, fmt: money});
     if (st.isCur && st.done){
       const rate = st.revFull / st.done;
-      ds.push({label: "Tahmin", data: allLabels.map((_, k) => k + 1 < st.done ? null : st.revFull + rate * (k + 1 - st.done)), borderColor: C, borderDash: [2, 4], pointRadius: 0, borderWidth: 2, fmt: money});
+      ds.push({label: "Tahmin", data: labels.map((_, k) => k + 1 < st.done ? null : st.revFull + rate * (k + 1 - st.done)), borderColor: C, borderDash: [2, 4], pointRadius: 0, borderWidth: 2, fmt: money});
     }
-    const pm = prevMonth(month), pIdx = idxOf(pm);
-    if (pIdx.length === dim(pm)){
-      let r2 = 0; ds.push({label: monthName(pm), data: allLabels.map((_, k) => pIdx[k] !== undefined ? (r2 += s.revenue[pIdx[k]]) : null), borderColor: B, pointRadius: 0, borderWidth: 1.5, tension: .2, fmt: money});
+    if (hasPrev){
+      let r2 = 0; ds.push({label: pmName, data: byDay(pm, "revenue").map(v => v === null ? null : (r2 += v)), borderColor: B, pointRadius: 0, borderWidth: 1.5, tension: .2, fmt: money});
     }
-    mk("c-cum", {type: "line", data: {labels: allLabels, datasets: ds}, options: baseOpts()});
+    mk("c-cum", {type: "line", data: {labels, datasets: ds}, options: baseOpts()});
 
-    const dRev = idx.map(i => s.revenue[i]);
-    const dds = [{type: "bar", label: "Ciro", data: dRev, backgroundColor: idx.map(i => DAYS[i] === TODAY ? A + "66" : A), borderRadius: 3, fmt: money},
-                 {type: "line", label: "7 gün ort.", data: ma7(s.revenue), borderColor: C, pointRadius: 0, borderWidth: 2, tension: .3, fmt: money}];
-    if (t && t.revenue) dds.push({type: "line", label: "Günlük hedef", data: idx.map(() => t.revenue / st.n), borderColor: M, borderDash: [6, 5], pointRadius: 0, borderWidth: 1.5, fmt: money});
-    mk("c-daily", {data: {labels, datasets: dds}, options: baseOpts()});
+    mk("c-daily", {data: {labels, datasets: [
+      {type: "bar", label: monthName(month), data: byDay(month, "revenue"), backgroundColor: todayCol(A), borderRadius: 3, fmt: money},
+      ...prevLine("revenue", money), ...targetLine(t && t.revenue, money)]}, options: baseOpts()});
 
     mk("c-ord", {data: {labels, datasets: [
-      {type: "bar", label: "Sipariş", data: idx.map(i => s.orders[i]), backgroundColor: idx.map(i => DAYS[i] === TODAY ? B + "66" : B), borderRadius: 3},
-      {type: "line", label: "7 gün ort.", data: ma7(s.orders), borderColor: C, pointRadius: 0, borderWidth: 2, tension: .3, fmt: v => f2.format(v)},
-      ...(t && t.orders ? [{type: "line", label: "Günlük hedef", data: idx.map(() => t.orders / st.n), borderColor: M, borderDash: [6, 5], pointRadius: 0, borderWidth: 1.5, fmt: v => f2.format(v)}] : [])]}, options: baseOpts()});
+      {type: "bar", label: monthName(month), data: byDay(month, "orders"), backgroundColor: todayCol(A), borderRadius: 3},
+      ...prevLine("orders", num), ...targetLine(t && t.orders, decimal)]}, options: baseOpts()});
   }
 
-  const roas = idx.map(i => s.roasSpend[i] ? s.revenue[i] / s.roasSpend[i] : null);
+  // Harcama: yalnız harcama (ROAS kartlarda ve tabloda).
   const sds = ch === "d2c"
-    ? [{type: "bar", label: "Meta", data: idx.map(i => s.meta[i]), backgroundColor: M, stack: "s", fmt: money},
-       {type: "bar", label: "Google", data: idx.map(i => s.google[i]), backgroundColor: C, stack: "s", fmt: money}]
-    : [{type: "bar", label: "Harcama", data: idx.map(i => s.spend[i]), backgroundColor: M, fmt: money}];
-  if (!noRev) sds.push({type: "line", label: "ROAS", data: roas, borderColor: P, yAxisID: "y2", pointRadius: 2, borderWidth: 2, tension: .3, fmt: v => f2.format(v) + "×"});
+    ? [{type: "bar", label: "Meta", data: byDay(month, "meta"), backgroundColor: todayCol(A), stack: "s", fmt: money},
+       {type: "bar", label: "Google", data: byDay(month, "google"), backgroundColor: todayCol(C), stack: "s", fmt: money}]
+    : [{type: "bar", label: monthName(month), data: byDay(month, "spend"), backgroundColor: todayCol(A), borderRadius: 3, fmt: money}];
   const so = baseOpts();
   so.scales.x.stacked = true; so.scales.y.stacked = true;
-  so.scales.y2 = {position: "right", grid: {display: false}, beginAtZero: true, ticks: {color: css("--muted"), font: {size: 11}, callback: v => f2.format(v) + "×"}};
-  mk("c-spend", {data: {labels, datasets: sds}, options: so});
+  mk("c-spend", {data: {labels, datasets: [...sds, ...prevLine("spend", money).map(d => ({...d, label: ch === "d2c" ? pmName + " (Meta + Google)" : pmName, stack: "p"}))]}, options: so});
 }
 document.getElementById("brand-chips").addEventListener("click", e => {
   const b = e.target.closest("[data-b]"); if (!b) return;
