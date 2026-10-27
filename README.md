@@ -12,6 +12,5 @@ Eski panel (`meta-ads-sheets-sync`) olduğu gibi duruyor; bu ayrı bir repo ve a
 GitHub Actions 2 saatte bir derleyip GitHub Pages'e yayınlar.
 
 Hedef kaydı kurulmadan girilen hedefler yalnız o tarayıcıda (localStorage) saklanır.
-Kurulum: `hedef_api.gs` (anahtar dolu hali `.yerel/` altında, repoda değil) Sheet'e
-Apps Script olarak eklenir, web uygulaması olarak dağıtılır, /exec adresi
+Kurulum: `hedef_api.gs` Sheet'e Apps Script olarak eklenir (yazma anahtarsız), web uygulaması olarak dağıtılır, /exec adresi
 `HEDEF_API_URL` secret'ına yazılır.

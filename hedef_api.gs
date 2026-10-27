@@ -6,15 +6,14 @@
  * da gömer, yani API'ye ulaşılamasa bile son kaydedilen hedefler görünür.
  *
  * Kurulum: panel Sheet'i → Uzantılar → Apps Script → bu dosyayı yapıştır →
- * ANAHTAR'ı doldur → Dağıt → Yeni dağıtım → Web uygulaması → "Ben olarak
+ * Dağıt → Yeni dağıtım → Web uygulaması → "Ben olarak
  * çalıştır", erişim "Herkes" → Yetkilendir → çıkan /exec adresi
  * HEDEF_API_URL secret'ına.
  *
- * ANAHTAR yalnız yazmayı korur (sayfa herkese açık, okuma serbest). Repoya
- * gerçek değeriyle girmez.
+ * Yazma bilerek anahtarsız: paneli yalnız ekip kullanıyor, hedefi kim açarsa
+ * girebilsin. Sadece biçim doğrulanır (ay, kanal, marka, negatif olmayan sayı).
  */
 
-const ANAHTAR = "__ANAHTAR__";
 const SEKME = "Hedefler";
 const BASLIK = ["Ay", "Kanal", "Marka", "Ciro Hedefi", "Sipariş Hedefi", "Güncelleme"];
 const KANALLAR = ["trendyol", "d2c"];
@@ -63,7 +62,6 @@ function doPost(e) {
   } catch (err) {
     return json_({ ok: false, error: "Geçersiz istek" });
   }
-  if (b.key !== ANAHTAR) return json_({ ok: false, error: "Anahtar yanlış" });
   if (!/^\d{4}-\d{2}$/.test(b.month) || KANALLAR.indexOf(b.channel) < 0 ||
       MARKALAR.indexOf(b.brand) < 0 || !sayiMi_(b.revenue) || !sayiMi_(b.orders)) {
     return json_({ ok: false, error: "Geçersiz hedef" });

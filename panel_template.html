@@ -380,13 +380,10 @@ async function saveTarget(key, revenue, orders){
     targets = {...targets, [key]: entry};
     return "Bu tarayıcıya kaydedildi (ortak kayıt henüz kurulmadı).";
   }
-  let anahtar = localStorage.getItem("hedef-anahtar");
-  if (!anahtar){ anahtar = prompt("Düzenleme anahtarı (bir kez sorulur):"); if (!anahtar) throw new Error("Anahtar girilmedi"); }
   const res = await fetch(HEDEF_API_URL, {method: "POST", headers: {"Content-Type": "text/plain;charset=utf-8"},
-    body: JSON.stringify({key: anahtar, month: m, channel: c, brand, revenue, orders})});
+    body: JSON.stringify({month: m, channel: c, brand, revenue, orders})});
   const body = await res.json();
-  if (!body.ok){ if (body.error === "Anahtar yanlış") localStorage.removeItem("hedef-anahtar"); throw new Error(body.error || "Kaydedilemedi"); }
-  localStorage.setItem("hedef-anahtar", anahtar);
+  if (!body.ok) throw new Error(body.error || "Kaydedilemedi");
   targets = {...targets, ...body.targets};
   return "Kaydedildi.";
 }
