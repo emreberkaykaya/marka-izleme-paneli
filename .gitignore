@@ -1,0 +1,7 @@
+.env
+service-account.json
+venv/
+__pycache__/
+.yerel/
+# build_panel.py çıktısı — her çalışmada yeniden üretilir
+index.html

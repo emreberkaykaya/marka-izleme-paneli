@@ -1,0 +1,555 @@
+"""
+Meta (Facebook/Instagram) Ads + Shopify -> Google Sheets anlık rapor senkronizasyonu.
+
+İki ayrı rapor besler:
+
+1. CPAS — Aqua di Polo, Frime ve Pierre Cardin markalarının Trendyol/Hepsiburada
+   hesaplarındaki "shared items" (collaborative ads / catalog segment) metrikleri.
+2. D2C — Frime ve Aqua di Polo'nun kendi web sitesine giden Meta hesabından
+   harcama/ROAS/CPC/CTR, Google Ads harcaması (google_ads_script.js'in Sheet'e
+   yazdığı günlüklerden), Shopify'dan gerçek sipariş ve ciro. ROAS burada Meta'nın
+   kendi attribution'ı yerine Meta harcaması ÷ Shopify cirosu olarak hesaplanır —
+   Frime'ın pikseli satın alma döndürmediği için Meta'nın kendi ROAS'ı güvenilmez.
+
+Her ikisi de aynı dört sabit dönem için çalışır (Dün / Son 7 Gün / Bu Ay / Geçen Ay).
+Her çalıştırma ilgili sekmedeki eski veriyi TEMİZLER ve güncel anlık durumu
+yazar — biriken bir log değil, her seferinde tazelenen bir tablo.
+
+Kurulum için README.md dosyasına bakın.
+
+Kullanım:
+    python sync.py
+"""
+
+import os
+import sys
+from datetime import date, datetime, timedelta, timezone
+
+import requests
+from dotenv import load_dotenv
+import gspread
+from google.oauth2.service_account import Credentials
+
+load_dotenv()
+
+GRAPH_API_VERSION = "v26.0"
+SHOPIFY_API_VERSION = "2026-01"
+
+# Marka -> {kanal: ad_account_id}
+AD_ACCOUNTS = {
+    "Aqua di Polo": {
+        "Trendyol": "1491645661756000",
+        "Hepsiburada": "1659658078807461",
+    },
+    "Frime": {
+        "Trendyol": "1094178842462484",
+        "Hepsiburada": "793918126452562",
+    },
+    "Pierre Cardin": {
+        "Trendyol": "1453774025708518",
+        "Hepsiburada": "1436412821275075",
+    },
+}
+
+# Marka -> marka bazlı süresiz System User token'ının .env değişken adı.
+# O değişken boşsa/tanımsızsa genel META_ACCESS_TOKEN'a (60 günlük) düşülür.
+BRAND_TOKEN_ENV_VAR = {
+    "Aqua di Polo": "META_ACCESS_TOKEN_AQUA_DI_POLO",
+    "Frime": "META_ACCESS_TOKEN_FRIME",
+    "Pierre Cardin": "META_ACCESS_TOKEN_PIERRE_CARDIN",
+    # MissLiva yalnızca D2C'de var ve reklam hesabı Aqua di Polo Turkey
+    # portföyünde; o portföyün sistem kullanıcısı hesaba zaten erişiyor.
+    "MissLiva": "META_ACCESS_TOKEN_AQUA_DI_POLO",
+}
+
+# Dönemler tek bir yerden, `period_bounds()` ile üretiliyor — Graph API'nin
+# hazır date_preset'leri KULLANILMIYOR. Sebebi: Meta'nın `this_month` preset'i
+# bugünü de (yarım günü) kapsarken Shopify tarafı bugünü dışarıda bırakıyordu;
+# bu da CPAS ile D2C sekmelerinin aynı "Bu Ay" etiketi altında farklı tarih
+# aralıkları göstermesine yol açıyordu. Artık iki taraf da aynı sınırları
+# kullanıyor. Dün / Son 7 Gün / Geçen Ay dünün sonunda biter. Tek istisna
+# "Bu Ay": ay başından bugün dahil olmak üzere MTD çekiliyor — ama iki taraf
+# için de aynı şekilde, yani eski hata (Meta bugünü sayarken Shopify saymıyor)
+# geri gelmiyor. Bugünün verisi yarım olduğu için Bu Ay rakamları gün içinde
+# değişir; Meta harcaması Shopify cirosunun biraz gerisinden gelebilir.
+#
+# "Bu Ay" ve "Geçen Ay" birbirini kapsamayan ayrı takvim aralıkları olduğu
+# için (nested değiller), metrik büyüklüğüne göre sıralamak kronolojik
+# sırayı garanti etmez — bu yüzden açık bir "Sıra" sütunu tutuyoruz.
+
+INSIGHTS_FIELDS = [
+    "spend",
+    "catalog_segment_actions",
+    "catalog_segment_value",
+    "catalog_segment_value_website_purchase_roas",
+    "catalog_segment_value_omni_purchase_roas",
+    "catalog_segment_value_mobile_purchase_roas",
+    "inline_link_clicks",
+]
+
+SHEET_HEADER = [
+    "Dönem",
+    "Sıra",
+    "Kanal",
+    "Ad Account ID",
+    "Amount Spent",
+    "Content Views (shared)",
+    "Adds to Cart (shared)",
+    "Purchases (shared)",
+    "Purchase Conversion Value (shared)",
+    "Purchase ROAS (shared)",
+    "Link Clicks",
+    "Son Güncelleme (UTC)",
+]
+
+# ---------------------------------------------------------------------------
+# D2C: markanın kendi web sitesine giden Meta hesabı + Shopify mağazası.
+# Yalnızca Frime ve Aqua di Polo'nun kendi Shopify erişimi var; Pierre Cardin
+# D2C raporunda yok.
+# ---------------------------------------------------------------------------
+
+D2C_META_ACCOUNTS = {
+    "Frime": "2121533615302118",
+    "Aqua di Polo": "1215686160473015",
+    "MissLiva": "1123824406969942",
+}
+
+# Marka -> (SHOPIFY_ACCESS_TOKEN_ENV_VAR, SHOPIFY_SHOP_ENV_VAR)
+D2C_SHOPIFY_ENV_VARS = {
+    "Frime": ("SHOPIFY_ACCESS_TOKEN_FRIME", "SHOPIFY_SHOP_FRIME"),
+    "Aqua di Polo": ("SHOPIFY_ACCESS_TOKEN_AQUA_DI_POLO", "SHOPIFY_SHOP_AQUA_DI_POLO"),
+    "MissLiva": ("SHOPIFY_ACCESS_TOKEN_MISSLIVA", "SHOPIFY_SHOP_MISSLIVA"),
+}
+
+# Kalıcı Admin API token'ı olmayan mağazalar için Dev Dashboard'daki
+# "Reporting" uygulaması (read_orders, read_products). Shopify 2026'da panelden
+# eski usul özel uygulama açtırmıyor; aynı organizasyondaki mağazaya kurulu bir
+# Dev Dashboard uygulaması client credentials ile 24 saatlik token alabiliyor,
+# sync her çalışmada taze token istiyor.
+D2C_SHOPIFY_CLIENT_CREDS = {
+    "MissLiva": ("SHOPIFY_CLIENT_ID_REPORTING", "SHOPIFY_CLIENT_SECRET_REPORTING"),
+}
+
+D2C_META_FIELDS = ["reach", "impressions", "clicks", "spend"]
+
+D2C_SHEET_HEADER = [
+    "Dönem",
+    "Sıra",
+    "Marka",
+    "Reach",
+    "Impressions",
+    "Clicks",
+    "Amount Spent",
+    "Shopify Revenue",
+    "Shopify Orders",
+    "Google Ads Spend",
+    "Son Güncelleme (UTC)",
+]
+
+# Google Ads harcaması API'den değil, her Google Ads hesabında saatlik çalışan
+# google_ads_script.js'in Sheet'e yazdığı günlük satırlardan okunur (Ads API
+# geliştirici jetonu onay istiyor). Sekme yoksa marka "Google bağlı değil".
+GOOGLE_ADS_TAB = "Google Ads - {brand}"
+GOOGLE_ADS_STALE_AFTER = timedelta(hours=26)
+
+# Dönem sınırları Europe/Istanbul yerel saatiyle hesaplanır ki "Dün" ve
+# "Bu Ay" Meta ile Shopify'da aynı günleri işaret etsin.
+try:
+    from zoneinfo import ZoneInfo
+    ISTANBUL = ZoneInfo("Europe/Istanbul")
+except ImportError:  # pragma: no cover
+    ISTANBUL = timezone(timedelta(hours=3))
+
+
+def period_bounds():
+    """Hem CPAS hem D2C'nin kullandığı tek dönem tanımı:
+    [(label, since, until, sort_order), ...] — `since` dahil, `until` hariç."""
+    now_ist = datetime.now(ISTANBUL)
+    today_start = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_start = today_start + timedelta(days=1)
+    yesterday_start = today_start - timedelta(days=1)
+    week_start = today_start - timedelta(days=7)
+    month_start = today_start.replace(day=1)
+    prev_month_end = month_start
+    prev_month_start = (month_start - timedelta(days=1)).replace(day=1)
+
+    # Karşılaştırma dönemleri: her görünür dönemin hemen öncesindeki eşit
+    # uzunlukta aralık. Sıra numaraları 10+ — panel bunları düğme olarak
+    # göstermiyor, yalnızca "önceki döneme göre ne oldu" farkını hesaplarken
+    # kullanıyor. Eşleşme kuralı basit: karşılaştırma sırası = dönem + 10.
+    prev_day_start = yesterday_start - timedelta(days=1)
+    prev_week_start = week_start - timedelta(days=7)
+    prev_prev_month_start = (prev_month_start - timedelta(days=1)).replace(day=1)
+    # "Bu Ay" MTD: bugün dahil. Karşılaştırması da geçen ayın aynı gün
+    # sayısı (bugünün karşılığı dahil), geçen ayın sonunu aşmadan.
+    elapsed = tomorrow_start - month_start
+    prev_month_same = min(prev_month_start + elapsed, prev_month_end)
+
+    return [
+        ("Dün", yesterday_start, today_start, 1),
+        ("Son 7 Gün", week_start, today_start, 2),
+        ("Bu Ay", month_start, tomorrow_start, 3),
+        ("Geçen Ay", prev_month_start, prev_month_end, 4),
+        ("Önceki Gün", prev_day_start, yesterday_start, 11),
+        ("Önceki 7 Gün", prev_week_start, week_start, 12),
+        ("Geçen Ay Aynı Aralık", prev_month_start, prev_month_same, 13),
+        ("Önceki Ay", prev_prev_month_start, prev_month_start, 14),
+    ]
+
+
+def meta_time_range(since: datetime, until: datetime) -> str:
+    """Yarı açık [since, until) aralığını Graph API'nin `time_range` biçimine
+    çevirir. Graph API gün bazlıdır ve `until` DAHİLDİR, bu yüzden until'dan
+    bir gün çıkarıyoruz — aksi halde her dönem bugünün yarım verisini de
+    kapsar ve Shopify tarafıyla tutmaz."""
+    since_day = since.date()
+    until_day = (until - timedelta(days=1)).date()
+    if until_day < since_day:
+        until_day = since_day
+    return f'{{"since":"{since_day}","until":"{until_day}"}}'
+
+
+def fetch_d2c_meta_metrics(ad_account_id: str, access_token: str, since: datetime, until: datetime) -> dict:
+    url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/act_{ad_account_id}/insights"
+    params = {
+        "fields": ",".join(D2C_META_FIELDS),
+        "time_range": meta_time_range(since, until),
+        "access_token": access_token,
+    }
+    response = requests.get(url, params=params, timeout=30)
+    response.raise_for_status()
+    data = response.json().get("data", [])
+    if not data:
+        return {"reach": None, "impressions": None, "clicks": None, "spend": None}
+
+    row = data[0]
+    return {
+        "reach": row.get("reach"),
+        "impressions": row.get("impressions"),
+        "clicks": row.get("clicks"),
+        "spend": row.get("spend"),
+    }
+
+
+def fetch_shopify_metrics(shop: str, access_token: str, since: datetime, until: datetime) -> dict:
+    """Verilen [since, until) aralığındaki iptal edilmemiş siparişlerin
+    toplam cirosunu ve sipariş sayısını döner. Cursor tabanlı sayfalama ile
+    (Link header) tüm siparişleri gezer — tek sayfaya güvenmek yüksek hacimli
+    dönemlerde (Geçen Ay gibi) ciroyu eksik gösterir."""
+    revenue = 0.0
+    orders = 0
+    url = f"https://{shop}/admin/api/{SHOPIFY_API_VERSION}/orders.json"
+    params = {
+        "status": "any",
+        "created_at_min": since.isoformat(),
+        "created_at_max": (until - timedelta(seconds=1)).isoformat(),
+        "fields": "total_price,cancelled_at",
+        "limit": 250,
+    }
+    headers = {"X-Shopify-Access-Token": access_token}
+
+    while url:
+        response = requests.get(url, params=params, headers=headers, timeout=30)
+        response.raise_for_status()
+        for order in response.json().get("orders", []):
+            if order.get("cancelled_at"):
+                continue
+            revenue += float(order["total_price"])
+            orders += 1
+
+        next_url = None
+        link_header = response.headers.get("Link", "")
+        for part in link_header.split(","):
+            if 'rel="next"' in part:
+                next_url = part.split(";")[0].strip().strip("<>")
+        url = next_url
+        params = None  # sonraki sayfanın URL'sinde parametreler zaten var
+
+    return {
+        "orders": orders,
+        "revenue": round(revenue, 2),
+        "aov": round(revenue / orders, 2) if orders else None,
+    }
+
+
+def resolve_access_token(brand: str) -> str:
+    brand_var = BRAND_TOKEN_ENV_VAR.get(brand)
+    brand_token = os.environ.get(brand_var) if brand_var else None
+    token = brand_token or os.environ.get("META_ACCESS_TOKEN")
+    if not token:
+        sys.exit(f"{brand} için ne {brand_var} ne de META_ACCESS_TOKEN .env'de tanımlı.")
+    return token
+
+
+def _find_action_value(actions, candidates):
+    """catalog_segment_actions / catalog_segment_value listesi aynı olayı
+    (ör. bir satın alma) birden çok kırılımla AYNI ANDA döner: omni_purchase
+    (kanala göre tekilleştirilmiş toplam) ile birlikte onu oluşturan
+    onsite_app_purchase, offsite_conversion.fb_pixel_purchase,
+    app_custom_event.fb_mobile_purchase ve "purchase" alias'ı gibi alt
+    kırılımlar da ayrı satırlar olarak listede yer alır. Bunların hepsini
+    toplamak aynı satın almayı 3-4 kez saymaya yol açar, bu yüzden
+    candidates sırasına göre TEK bir kanonik action_type seçiyoruz
+    (öncelik: omni_*, yoksa genel alias)."""
+    by_type = {item.get("action_type"): item.get("value") for item in (actions or [])}
+    for candidate in candidates:
+        value = by_type.get(candidate)
+        if value is not None:
+            return float(value)
+    return None
+
+
+def _first_roas(*roas_lists):
+    """Birden fazla ROAS alanından (omni/website/mobile) ilk bulunan değeri döner."""
+    for roas_list in roas_lists:
+        for item in roas_list or []:
+            value = item.get("value")
+            if value is not None:
+                return float(value)
+    return None
+
+
+def fetch_account_insights(ad_account_id: str, access_token: str, since: datetime, until: datetime) -> dict:
+    url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/act_{ad_account_id}/insights"
+    params = {
+        "fields": ",".join(INSIGHTS_FIELDS),
+        "time_range": meta_time_range(since, until),
+        "access_token": access_token,
+    }
+    response = requests.get(url, params=params, timeout=30)
+    response.raise_for_status()
+    payload = response.json()
+    data = payload.get("data", [])
+    if not data:
+        return {
+            "spend": None,
+            "content_views": None,
+            "add_to_cart": None,
+            "purchases": None,
+            "purchase_value": None,
+            "roas": None,
+            "link_clicks": None,
+        }
+
+    row = data[0]
+    actions = row.get("catalog_segment_actions", [])
+    values = row.get("catalog_segment_value", [])
+
+    return {
+        "spend": row.get("spend"),
+        "content_views": _find_action_value(actions, ["omni_view_content", "view_content"]),
+        "add_to_cart": _find_action_value(actions, ["omni_add_to_cart", "add_to_cart"]),
+        "purchases": _find_action_value(actions, ["omni_purchase", "purchase"]),
+        "purchase_value": _find_action_value(values, ["omni_purchase", "purchase"]),
+        "roas": _first_roas(
+            row.get("catalog_segment_value_omni_purchase_roas"),
+            row.get("catalog_segment_value_website_purchase_roas"),
+            row.get("catalog_segment_value_mobile_purchase_roas"),
+        ),
+        "link_clicks": row.get("inline_link_clicks"),
+    }
+
+
+def open_spreadsheet():
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_file(
+        os.environ["GOOGLE_SERVICE_ACCOUNT_FILE"], scopes=scopes
+    )
+    client = gspread.authorize(creds)
+    return client.open_by_key(os.environ["GOOGLE_SHEET_ID"])
+
+
+def get_or_create_worksheet(spreadsheet, title: str, header: list[str] = SHEET_HEADER):
+    try:
+        worksheet = spreadsheet.worksheet(title)
+    except gspread.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(title=title, rows=100, cols=len(header))
+    return worksheet
+
+
+def main():
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    spreadsheet = open_spreadsheet()
+    total_rows = 0
+
+    for brand, channels in AD_ACCOUNTS.items():
+        access_token = resolve_access_token(brand)
+        worksheet = get_or_create_worksheet(spreadsheet, brand)
+        rows = [SHEET_HEADER]
+
+        for channel, ad_account_id in channels.items():
+            for period_label, since, until, sort_order in period_bounds():
+                print(f"Çekiliyor: {brand} / {channel} / {period_label} ({ad_account_id})...")
+                try:
+                    metrics = fetch_account_insights(ad_account_id, access_token, since, until)
+                except requests.HTTPError as exc:
+                    print(f"  HATA: {exc.response.text}", file=sys.stderr)
+                    continue
+
+                rows.append([
+                    period_label,
+                    sort_order,
+                    channel,
+                    f"'{ad_account_id}",  # başına ' koyup bilimsel gösterimi engelliyoruz
+                    metrics["spend"],
+                    metrics["content_views"],
+                    metrics["add_to_cart"],
+                    metrics["purchases"],
+                    metrics["purchase_value"],
+                    metrics["roas"],
+                    metrics["link_clicks"],
+                    now_str,
+                ])
+
+        worksheet.clear()
+        worksheet.update(range_name="A1", values=rows, value_input_option="USER_ENTERED")
+        total_rows += len(rows) - 1
+
+    print(f"CPAS: {total_rows} satır, {len(AD_ACCOUNTS)} marka sekmesine yazıldı (Dün/Son 7 Gün/Bu Ay/Geçen Ay).")
+
+    sync_d2c(spreadsheet, now_str)
+
+
+def resolve_d2c_meta_token(brand: str, ad_account_id: str) -> str:
+    """CPAS için verilen marka-özel System User token'ının D2C (web sitesi)
+    hesabına erişimi olmayabilir — CPAS ve D2C farklı Business Manager
+    varlıkları olabilir. Marka token'ını dener, erişim reddedilirse
+    (OAuthException #200) genel META_ACCESS_TOKEN'a düşer."""
+    brand_token = resolve_access_token(brand)
+    probe = requests.get(
+        f"https://graph.facebook.com/{GRAPH_API_VERSION}/act_{ad_account_id}/insights",
+        params={"fields": "spend", "date_preset": "yesterday", "access_token": brand_token},
+        timeout=15,
+    )
+    if probe.status_code == 200:
+        return brand_token
+
+    general_token = os.environ.get("META_ACCESS_TOKEN")
+    if general_token and general_token != brand_token:
+        print(f"  Not: {brand} marka token'ı D2C hesabına erişemiyor, genel token'a düşülüyor.")
+        return general_token
+    return brand_token
+
+
+def shopify_client_credentials_token(shop: str, client_id: str, client_secret: str) -> str:
+    """Client credentials grant: yönlendirmesiz, 24 saat geçerli Admin API token'ı."""
+    resp = requests.post(
+        f"https://{shop}/admin/oauth/access_token",
+        data={"grant_type": "client_credentials", "client_id": client_id,
+              "client_secret": client_secret},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
+
+def resolve_shopify_token(brand: str, shop: str):
+    """Önce kalıcı token, yoksa client credentials; ikisi de yoksa None."""
+    token_var, _ = D2C_SHOPIFY_ENV_VARS[brand]
+    token = os.environ.get(token_var)
+    if token:
+        return token
+    creds = D2C_SHOPIFY_CLIENT_CREDS.get(brand)
+    if not creds:
+        return None
+    client_id, client_secret = (os.environ.get(v) for v in creds)
+    if not client_id or not client_secret:
+        return None
+    return shopify_client_credentials_token(shop, client_id, client_secret)
+
+
+def read_google_ads_daily(spreadsheet, brand: str):
+    """Betiğin yazdığı sekmeden {gün: harcama} döner; sekme yoksa None."""
+    try:
+        worksheet = spreadsheet.worksheet(GOOGLE_ADS_TAB.format(brand=brand))
+    except gspread.WorksheetNotFound:
+        return None
+    # Biçimlenmemiş değer: Sheet yerel ayarı "12,34" döndürüp float'ı bozmasın.
+    values = worksheet.get_all_values(value_render_option="UNFORMATTED_VALUE")
+    daily, stamp, tz = {}, "", ""
+    for row in values[1:]:
+        if len(row) < 7:
+            continue
+        tz, stamp = str(row[5]), str(row[6])
+        day = str(row[0]).strip()
+        if day:
+            daily[date.fromisoformat(day)] = float(row[1] or 0)
+
+    if tz and tz != "Europe/Istanbul":
+        print(f"  UYARI: {brand} Google Ads hesabı {tz} saat diliminde; günler Meta ile kayabilir.", file=sys.stderr)
+    try:
+        updated = datetime.strptime(stamp, "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) - updated > GOOGLE_ADS_STALE_AFTER:
+            print(f"  UYARI: {brand} Google Ads verisi eski ({stamp}); betik çalışıyor mu?", file=sys.stderr)
+    except ValueError:
+        print(f"  UYARI: {brand} Google Ads sekmesinde güncelleme damgası yok.", file=sys.stderr)
+    return daily
+
+
+def google_ads_spend(daily, since: datetime, until: datetime):
+    """[since, until) aralığının toplamı; betik kurulu değilse boş hücre."""
+    if daily is None:
+        return ""
+    return round(sum(v for d, v in daily.items() if since.date() <= d < until.date()), 2)
+
+
+def sync_d2c(spreadsheet, now_str: str) -> None:
+    worksheet = get_or_create_worksheet(spreadsheet, "D2C", header=D2C_SHEET_HEADER)
+    if worksheet.col_count < len(D2C_SHEET_HEADER):
+        worksheet.resize(cols=len(D2C_SHEET_HEADER))  # eski sekme yeni sütuna yer açsın
+    rows = [D2C_SHEET_HEADER]
+    periods = period_bounds()
+
+    for brand, ad_account_id in D2C_META_ACCOUNTS.items():
+        access_token = resolve_d2c_meta_token(brand, ad_account_id)
+        token_var, shop_var = D2C_SHOPIFY_ENV_VARS[brand]
+        shopify_shop = os.environ.get(shop_var)
+        try:
+            shopify_token = resolve_shopify_token(brand, shopify_shop) if shopify_shop else None
+        except requests.HTTPError as exc:
+            print(f"  HATA (Shopify token): {brand}: {exc.response.text[:200]}", file=sys.stderr)
+            shopify_token = None
+        if not shopify_token or not shopify_shop:
+            # Marka yine panelde görünsün: Meta tarafı yazılır, ciro/sipariş
+            # hücreleri boş kalır ("Shopify bağlı değil" olarak gösterilir).
+            print(f"  UYARI: {brand} için Shopify erişimi ({token_var}) yok; yalnız Meta yazılıyor.", file=sys.stderr)
+            shopify_token = None
+        google_daily = read_google_ads_daily(spreadsheet, brand)
+
+        for period_label, since, until, sort_order in periods:
+            print(f"Çekiliyor (D2C): {brand} / {period_label}...")
+            try:
+                meta = fetch_d2c_meta_metrics(ad_account_id, access_token, since, until)
+            except requests.HTTPError as exc:
+                print(f"  HATA (Meta): {exc.response.text}", file=sys.stderr)
+                continue
+            if shopify_token is None:
+                shop = {"revenue": "", "orders": ""}
+            else:
+                try:
+                    shop = fetch_shopify_metrics(shopify_shop, shopify_token, since, until)
+                except requests.HTTPError as exc:
+                    print(f"  HATA (Shopify): {exc.response.text}", file=sys.stderr)
+                    continue
+
+            rows.append([
+                period_label,
+                sort_order,
+                brand,
+                meta["reach"],
+                meta["impressions"],
+                meta["clicks"],
+                meta["spend"],
+                shop["revenue"],
+                shop["orders"],
+                google_ads_spend(google_daily, since, until),
+                now_str,
+            ])
+
+    worksheet.clear()
+    worksheet.update(range_name="A1", values=rows, value_input_option="USER_ENTERED")
+    print(f"D2C: {len(rows) - 1} satır, D2C sekmesine yazıldı.")
+
+
+if __name__ == "__main__":
+    main()
