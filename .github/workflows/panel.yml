@@ -1,9 +1,10 @@
-name: Marka izleme paneli
+name: Yönlendirme
 
+# Panel 2026-10-28'de meta-ads-sheets-sync reposuna taşındı; bu adres yalnız
+# oraya yönlendirir. Zamanlama yok — tek seferlik yayın.
 on:
-  # Eski panelle (15. dakika) çakışmasın diye 45. dakikada, 2 saatte bir.
-  schedule:
-    - cron: "45 */2 * * *"
+  push:
+    branches: [main]
   workflow_dispatch: {}
 
 permissions:
@@ -11,58 +12,17 @@ permissions:
   pages: write
   id-token: write
 
-concurrency:
-  group: "pages"
-  cancel-in-progress: false
-
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Write Google service account file
-        run: echo "$GOOGLE_SERVICE_ACCOUNT_JSON" > service-account.json
-        env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-
-      - name: Build panel
-        env:
-          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
-          META_ACCESS_TOKEN_AQUA_DI_POLO: ${{ secrets.META_ACCESS_TOKEN_AQUA_DI_POLO }}
-          META_ACCESS_TOKEN_FRIME: ${{ secrets.META_ACCESS_TOKEN_FRIME }}
-          META_ACCESS_TOKEN_PIERRE_CARDIN: ${{ secrets.META_ACCESS_TOKEN_PIERRE_CARDIN }}
-          SHOPIFY_ACCESS_TOKEN_FRIME: ${{ secrets.SHOPIFY_ACCESS_TOKEN_FRIME }}
-          SHOPIFY_SHOP_FRIME: ${{ secrets.SHOPIFY_SHOP_FRIME }}
-          SHOPIFY_ACCESS_TOKEN_AQUA_DI_POLO: ${{ secrets.SHOPIFY_ACCESS_TOKEN_AQUA_DI_POLO }}
-          SHOPIFY_SHOP_AQUA_DI_POLO: ${{ secrets.SHOPIFY_SHOP_AQUA_DI_POLO }}
-          SHOPIFY_SHOP_MISSLIVA: ${{ secrets.SHOPIFY_SHOP_MISSLIVA }}
-          GOOGLE_SERVICE_ACCOUNT_FILE: ./service-account.json
-          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
-          HEDEF_API_URL: ${{ secrets.HEDEF_API_URL }}
-        run: |
-          python build_panel.py
-          mkdir -p _site
-          cp index.html _site/index.html
-
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: _site
-
   deploy:
-    needs: build
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: yonlendirme
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
