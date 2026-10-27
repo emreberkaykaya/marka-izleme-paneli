@@ -225,14 +225,15 @@ function delta(cur, prev){
 }
 
 /* ---------- durum ---------- */
-let ch = "trendyol", month = CUR_MONTH, brandSel = "Tümü";
+let ch = "trendyol", month = CUR_MONTH, brandSel = null;
 let targets = Object.assign({}, DATA.targets || {});
 try { Object.assign(targets, JSON.parse(localStorage.getItem("hedefler-yerel") || "{}")); } catch (e) {}
 
 /* ---------- seri ---------- */
 const brandsOf = c => Object.keys(DATA[c]).sort((a, b) => a.localeCompare(b, "tr"));
 function series(c, brand){
-  const list = brand === "Tümü" ? brandsOf(c) : [brand];
+  // Markalar hiçbir yerde birleştirilmez: her seri tek markanın.
+  const list = [brand];
   const z = () => DAYS.map(() => 0);
   const out = {spend: z(), meta: z(), google: z(), revenue: z(), orders: z(), clicks: z(), impressions: z(),
                roasSpend: z(), hasRevenue: false, hasGoogle: false};
@@ -279,11 +280,7 @@ function stats(c, brand, m){
   };
 }
 function targetOf(c, brand, m){
-  if (brand !== "Tümü") return targets[`${m}|${c}|${brand}`] || null;
-  const ts = brandsOf(c).map(b => targets[`${m}|${c}|${b}`]).filter(Boolean);
-  if (!ts.length) return null;
-  const add = k => ts.some(t => t[k] !== null && t[k] !== undefined) ? sum(ts.map(t => t[k])) : null;
-  return {revenue: add("revenue"), orders: add("orders")};
+  return targets[`${m}|${c}|${brand}`] || null;
 }
 /* Durum: ay sonu tahmini hedefin neresinde? */
 function status(proj, goal){
@@ -426,8 +423,8 @@ function baseOpts(extra = {}){
 }
 function renderCharts(){
   charts.forEach(c => c.destroy()); charts = [];
-  const brands = ["Tümü", ...brandsOf(ch)];
-  if (!brands.includes(brandSel)) brandSel = "Tümü";
+  const brands = brandsOf(ch);
+  if (!brands.includes(brandSel)) brandSel = brands[0];
   document.getElementById("brand-chips").innerHTML = brands.map(b =>
     `<button type="button" class="chip-btn" data-b="${esc(b)}" aria-pressed="${b === brandSel}">${esc(b)}</button>`).join("");
 
@@ -496,7 +493,7 @@ document.getElementById("brand-chips").addEventListener("click", e => {
 function renderTable(){
   const st = stats(ch, brandSel, month), s = st.s, d2c = ch === "d2c";
   const cols = ["Gün", ...(d2c ? ["Meta", "Google"] : []), "Harcama", "Ciro", "Sipariş", "ROAS", "Sipariş başı", "Tıklama"];
-  document.getElementById("tb-sub").textContent = `${brandSel === "Tümü" ? "Tüm markalar" : brandSel} · ${monthName(month)}`;
+  document.getElementById("tb-sub").textContent = `${brandSel} · ${monthName(month)}`;
   document.getElementById("thead").innerHTML = `<tr>${cols.map(c => `<th>${c}</th>`).join("")}</tr>`;
   const row = (lbl, sp, me, go, rv, od, rs, cl, cls = "") => `<tr class="${cls}"><td>${lbl}</td>${d2c ? `<td>${money(me)}</td><td>${s.hasGoogle ? money(go) : "—"}</td>` : ""}
     <td>${money(sp)}</td><td>${s.hasRevenue ? money(rv) : "—"}</td><td>${s.hasRevenue ? num(od) : "—"}</td>
@@ -511,7 +508,7 @@ function renderTable(){
 const months = [...new Set(DAYS.map(d => d.slice(0, 7)))].reverse();
 document.getElementById("months").innerHTML = months.map(m => `<button type="button" data-m="${m}">${monthName(m)}</button>`).join("");
 document.getElementById("months").addEventListener("click", e => { const b = e.target.closest("[data-m]"); if (b){ month = b.dataset.m; render(); } });
-document.getElementById("tabs").addEventListener("click", e => { const b = e.target.closest("[data-ch]"); if (b){ ch = b.dataset.ch; brandSel = "Tümü"; render(); } });
+document.getElementById("tabs").addEventListener("click", e => { const b = e.target.closest("[data-ch]"); if (b){ ch = b.dataset.ch; brandSel = null; render(); } });
 document.getElementById("stamp").textContent = DATA.updated;
 
 function render(){
