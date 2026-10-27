@@ -67,13 +67,18 @@ h2{font-family:Archivo,sans-serif;font-weight:700;font-size:18px;margin:0}
 .sec-head p{margin:0;color:var(--muted);font-size:13px}
 
 /* özet şeridi */
-.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:1px;background:var(--line);
-  border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:var(--shadow)}
-.kpi:last-child:nth-child(odd){grid-column:1/-1}
-.kpi{background:var(--surface);padding:14px 16px;display:flex;flex-direction:column;gap:2px}
-.kpi dt{font-size:12px;color:var(--muted);font-weight:500}
-.kpi dd{margin:0;font-family:Archivo,sans-serif;font-weight:700;font-size:24px;letter-spacing:-.01em}
-.kpi small{font-size:12px;color:var(--muted)}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin:0}
+.sum{background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);
+  padding:16px 18px;display:flex;flex-direction:column;gap:10px}
+.sum-head{display:flex;justify-content:space-between;align-items:baseline}
+.sum-name{font-family:Archivo,sans-serif;font-weight:700;font-size:18px}
+.sum-lbl{font:600 11px "IBM Plex Mono",monospace;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.sum-roas{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sum-roas b{font-family:Archivo,sans-serif;font-weight:800;font-size:34px;letter-spacing:-.02em;line-height:1}
+.sum-kv{display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;margin:0;padding-top:10px;border-top:1px solid var(--line-soft)}
+.sum-kv dt{font-size:11.5px;color:var(--muted)}
+.sum-kv dd{margin:0;font-weight:600;font-size:16px}
+.sum-kv dd small{display:block;font-weight:400;font-size:11.5px;color:var(--muted)}
 
 /* marka hedef kartları */
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
@@ -153,8 +158,8 @@ tfoot td{font-weight:700;border-top:2px solid var(--line)}
   </nav>
 
   <section aria-labelledby="ozet-h">
-    <h2 id="ozet-h" hidden>Özet</h2>
-    <dl class="kpis" id="kpis"></dl>
+    <div class="sec-head" style="margin-bottom:10px"><h2 id="ozet-h">Markalar</h2><p id="ozet-sub"></p></div>
+    <div class="kpis" id="kpis"></div>
   </section>
 
   <section id="goal-sec" aria-labelledby="goal-h">
@@ -255,7 +260,7 @@ function stats(c, brand, m){
   const done = isCur ? +TODAY.slice(8) - 1 : n;
   const pick = (k, ids) => sum(ids.map(i => s[k][i]));
   const rev = pick("revenue", idx), ord = pick("orders", idx), spend = pick("spend", idx);
-  const revFull = pick("revenue", full), ordFull = pick("orders", full), spendFull = pick("spend", full);
+  const revFull = pick("revenue", full), ordFull = pick("orders", full), spendFull = pick("spend", full), roasSpendFull = pick("roasSpend", full);
   const proj = (v, vFull) => isCur ? (done ? vFull / done * n : null) : v;
   // Geçen ayın aynı gün sayısı (tamamlanmış günlerle kıyas)
   const pm = prevMonth(m), pIdx = idxOf(pm).slice(0, isCur ? done : n);
@@ -264,10 +269,11 @@ function stats(c, brand, m){
     s, idx, n, isCur, done, rev, ord, spend,
     meta: pick("meta", idx), google: pick("google", idx),
     roas: pick("roasSpend", idx) ? rev / pick("roasSpend", idx) : 0,
-    revFull, ordFull, spendFull, projRev: proj(rev, revFull), projOrd: proj(ord, ordFull),
+    revFull, ordFull, spendFull, roasSpendFull, projRev: proj(rev, revFull), projOrd: proj(ord, ordFull),
     prevRev: prevComplete && pIdx.length ? pick("revenue", pIdx) : null,
     prevOrd: prevComplete && pIdx.length ? pick("orders", pIdx) : null,
     prevSpend: prevComplete && pIdx.length ? pick("spend", pIdx) : null,
+    prevRoasSpend: prevComplete && pIdx.length ? pick("roasSpend", pIdx) : null,
     prevRevFull: prevComplete && pIdx.length ? pick("revenue", pIdx) : null,
     partial: idx.length < n && !isCur,
   };
@@ -290,18 +296,29 @@ function status(proj, goal){
 }
 
 /* ---------- özet şeridi ---------- */
+function summaryCard(brand){
+  const st = stats(ch, brand, month);
+  const noRev = ch === "d2c" && !DATA.d2c[brand].revenue;
+  const t = TARGET_CH.includes(ch) ? targetOf(ch, brand, month) : null;
+  const cmp = st.isCur ? "geçen ayın aynı günlerine göre" : "önceki aya göre";
+  const roasFull = st.roasSpendFull ? st.revFull / st.roasSpendFull : 0;
+  const prevRoas = st.prevRoasSpend ? st.prevRev / st.prevRoasSpend : null;
+  const kv = (k, v, sub) => `<div><dt>${k}</dt><dd>${v}<small>${sub || ""}</small></dd></div>`;
+  return `<article class="sum">
+    <div class="sum-head"><span class="sum-name">${esc(brand)}</span><span class="sum-lbl">ROAS</span></div>
+    <div class="sum-roas"><b>${noRev ? "—" : roasF(st.roas)}</b>${noRev ? `<span class="meter-sub">Shopify bağlı değil</span>`
+      : prevRoas ? `<span class="meter-sub">${delta(roasFull, prevRoas)} ${cmp}</span>` : ""}</div>
+    <dl class="sum-kv">
+      ${kv("Ciro", noRev ? "—" : money(st.rev), noRev ? "" : t && t.revenue ? "hedefin " + pctF(st.rev / t.revenue) + "'i" : delta(st.revFull, st.prevRev))}
+      ${kv("Sipariş", noRev ? "—" : num(st.ord), noRev ? "" : t && t.orders ? "hedefin " + pctF(st.ord / t.orders) + "'i" : delta(st.ordFull, st.prevOrd))}
+      ${kv("Harcama", money(st.spend), ch === "d2c" ? `Meta ${money(st.meta)} · Google ${DATA.d2c[brand].googleSpend ? money(st.google) : "—"}` : delta(st.spendFull, st.prevSpend))}
+      ${kv(st.isCur ? "Ay sonu tahmini" : "Ay toplamı", noRev ? "—" : money(st.isCur ? st.projRev : st.rev), noRev ? "" : st.isCur ? `${st.done} / ${st.n} gün tamam` : "")}
+    </dl>
+  </article>`;
+}
 function renderKpis(){
-  const st = stats(ch, "Tümü", month), cmp = st.isCur ? "geçen ayın aynı günlerine göre" : "önceki aya göre";
-  const t = TARGET_CH.includes(ch) ? targetOf(ch, "Tümü", month) : null;
-  const cells = [
-    ["Ciro", money(st.rev), t && t.revenue ? `hedef ${money(t.revenue)} · ${pctF(st.rev / t.revenue)}` : delta(st.revFull, st.prevRev) + " " + cmp],
-    ["Sipariş", num(st.ord), t && t.orders ? `hedef ${num(t.orders)} · ${pctF(st.ord / t.orders)}` : delta(st.ordFull, st.prevOrd) + " " + cmp],
-    ["Harcama", money(st.spend), ch === "d2c" ? `Meta ${money(st.meta)} · Google ${st.s.hasGoogle ? money(st.google) : "bağlı değil"}` : ""],
-    ["ROAS", roasF(st.roas), st.ord ? `sipariş başı maliyet ${money(st.spend / st.ord)}` : ""],
-    ["Ay sonu tahmini", st.isCur ? money(st.projRev) : money(st.rev), st.isCur ? `${st.done} / ${st.n} gün tamam` : (st.partial ? "ayın tamamı pencerede değil" : "ay kapandı")],
-  ];
-  document.getElementById("kpis").innerHTML = cells.map(([k, v, s]) =>
-    `<div class="kpi"><dt>${k}</dt><dd>${v}</dd><small>${s}</small></div>`).join("");
+  document.getElementById("ozet-sub").textContent = `${monthName(month)} · ${month === CUR_MONTH ? "ay başından bugüne" : "tam ay"}`;
+  document.getElementById("kpis").innerHTML = brandsOf(ch).map(summaryCard).join("");
 }
 
 /* ---------- hedef kartları ---------- */
@@ -424,7 +441,7 @@ function renderCharts(){
   box.innerHTML = (noRev ? "" :
       chartBox("c-cum", "Kümülatif ciro", t && t.revenue ? "gerçekleşen · hedef çizgisi · ay sonu tahmini" : "gerçekleşen · geçen ay aynı gün") +
       chartBox("c-daily", "Günlük ciro", "çubuk: gün · çizgi: 7 günlük ortalama" + (t && t.revenue ? " · kesikli: günlük hedef" : "")) +
-      chartBox("c-ord", "Günlük sipariş", "çubuk: gün · çizgi: 7 günlük ortalama")) +
+      chartBox("c-ord", "Günlük sipariş", "çubuk: gün · çizgi: 7 günlük ortalama" + (t && t.orders ? " · kesikli: günlük hedef" : ""))) +
     chartBox("c-spend", "Günlük harcama ve ROAS", ch === "d2c" ? "Meta + Google yığılı · çizgi: ROAS (sağ eksen)" : "çubuk: harcama · çizgi: ROAS (sağ eksen)");
 
   const ma7 = arr => idx.map(i => { const w = []; for (let k = i - 6; k <= i; k++) if (k >= 0 && DAYS[k] !== TODAY) w.push(arr[k]); return DAYS[i] === TODAY || w.length < 7 ? null : sum(w) / 7; });
@@ -455,7 +472,8 @@ function renderCharts(){
 
     mk("c-ord", {data: {labels, datasets: [
       {type: "bar", label: "Sipariş", data: idx.map(i => s.orders[i]), backgroundColor: idx.map(i => DAYS[i] === TODAY ? B + "66" : B), borderRadius: 3},
-      {type: "line", label: "7 gün ort.", data: ma7(s.orders), borderColor: C, pointRadius: 0, borderWidth: 2, tension: .3, fmt: v => f2.format(v)}]}, options: baseOpts()});
+      {type: "line", label: "7 gün ort.", data: ma7(s.orders), borderColor: C, pointRadius: 0, borderWidth: 2, tension: .3, fmt: v => f2.format(v)},
+      ...(t && t.orders ? [{type: "line", label: "Günlük hedef", data: idx.map(() => t.orders / st.n), borderColor: M, borderDash: [6, 5], pointRadius: 0, borderWidth: 1.5, fmt: v => f2.format(v)}] : [])]}, options: baseOpts()});
   }
 
   const roas = idx.map(i => s.roasSpend[i] ? s.revenue[i] / s.roasSpend[i] : null);
