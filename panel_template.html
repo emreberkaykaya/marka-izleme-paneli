@@ -233,24 +233,15 @@ try { Object.assign(targets, JSON.parse(localStorage.getItem("hedefler-yerel") |
 const brandsOf = c => Object.keys(DATA[c]).sort((a, b) => a.localeCompare(b, "tr"));
 function series(c, brand){
   // Markalar hiçbir yerde birleştirilmez: her seri tek markanın.
-  const list = [brand];
-  const z = () => DAYS.map(() => 0);
-  const out = {spend: z(), meta: z(), google: z(), revenue: z(), orders: z(), clicks: z(), impressions: z(),
-               roasSpend: z(), hasRevenue: false, hasGoogle: false};
-  for (const b of list){
-    const s = DATA[c][b];
-    const meta = c === "d2c" ? s.metaSpend : s.spend;
-    const goog = c === "d2c" && s.googleSpend ? s.googleSpend : null;
-    if (goog) out.hasGoogle = true;
-    DAYS.forEach((_, i) => {
-      const sp = meta[i] + (goog ? goog[i] : 0);
-      out.meta[i] += meta[i]; out.google[i] += goog ? goog[i] : 0; out.spend[i] += sp;
-      out.clicks[i] += s.clicks[i]; out.impressions[i] += s.impressions[i];
-      if (s.revenue){ out.revenue[i] += s.revenue[i]; out.orders[i] += s.orders[i]; out.roasSpend[i] += sp; }
-    });
-    if (s.revenue) out.hasRevenue = true;
-  }
-  return out;
+  // Ciro/sipariş null = o gün için Shopify verisi yok (0 ile karışmasın).
+  const s = DATA[c][brand];
+  const meta = c === "d2c" ? s.metaSpend : s.spend;
+  const google = c === "d2c" && s.googleSpend ? s.googleSpend : DAYS.map(() => 0);
+  const spend = DAYS.map((_, i) => meta[i] + google[i]);
+  const revenue = s.revenue || DAYS.map(() => null), orders = s.orders || DAYS.map(() => null);
+  return {spend, meta, google, revenue, orders, clicks: s.clicks, impressions: s.impressions,
+          roasSpend: DAYS.map((_, i) => revenue[i] === null ? 0 : spend[i]),
+          hasRevenue: !!s.revenue, hasGoogle: !!(c === "d2c" && s.googleSpend)};
 }
 const idxOf = m => DAYS.map((d, i) => d.startsWith(m) ? i : -1).filter(i => i >= 0);
 
@@ -265,7 +256,10 @@ function stats(c, brand, m){
   const proj = (v, vFull) => isCur ? (done ? vFull / done * n : null) : v;
   // Geçen ayın aynı gün sayısı (tamamlanmış günlerle kıyas)
   const pm = prevMonth(m), pIdx = idxOf(pm).slice(0, isCur ? done : n);
-  const prevComplete = idxOf(pm).length === dim(pm);
+  // Geçen ay kıyası yalnız o ayın tamamı pencerede ve cirosu eksiksizse.
+  const covered = ids => ids.every(i => s.revenue[i] !== null);
+  const prevComplete = idxOf(pm).length === dim(pm) && covered(pIdx);
+  const missing = s.hasRevenue ? idx.filter(i => s.revenue[i] === null).length : 0;
   return {
     s, idx, n, isCur, done, rev, ord, spend,
     meta: pick("meta", idx), google: pick("google", idx),
@@ -276,12 +270,15 @@ function stats(c, brand, m){
     prevSpend: prevComplete && pIdx.length ? pick("spend", pIdx) : null,
     prevRoasSpend: prevComplete && pIdx.length ? pick("roasSpend", pIdx) : null,
     prevRevFull: prevComplete && pIdx.length ? pick("revenue", pIdx) : null,
-    partial: idx.length < n && !isCur,
+    partial: idx.length < n && !isCur, missing,
+    firstData: missing ? DAYS[idx.find(i => s.revenue[i] !== null)] : null,
   };
 }
 function targetOf(c, brand, m){
   return targets[`${m}|${c}|${brand}`] || null;
 }
+// Shopify kaydı ayın ortasında başlıyorsa (60 gün sınırı) rakam eksik gün içerir.
+const missingNote = st => st.missing ? `Shopify verisi yalnız ${dayLabel(st.firstData)} ve sonrası (${st.missing} gün yok)` : "";
 /* Durum: ay sonu tahmini hedefin neresinde? */
 function status(proj, goal){
   if (!goal) return {txt: "Hedef girilmedi", col: "--neutral-bar"};
@@ -295,7 +292,9 @@ function status(proj, goal){
 /* ---------- özet şeridi ---------- */
 function summaryCard(brand){
   const st = stats(ch, brand, month);
-  const noRev = ch === "d2c" && !DATA.d2c[brand].revenue;
+  const st0 = st, noShop = ch === "d2c" && !DATA.d2c[brand].revenue;
+  // Ayın bir kısmında Shopify verisi yoksa ay toplamı/ROAS yanıltır: gösterilmez.
+  const noRev = noShop || st0.missing > 0;
   const t = TARGET_CH.includes(ch) ? targetOf(ch, brand, month) : null;
   const cmp = st.isCur ? "geçen ayın aynı günlerine göre" : "önceki aya göre";
   const roasFull = st.roasSpendFull ? st.revFull / st.roasSpendFull : 0;
@@ -303,10 +302,10 @@ function summaryCard(brand){
   const kv = (k, v, sub) => `<div><dt>${k}</dt><dd>${v}<small>${sub || ""}</small></dd></div>`;
   return `<article class="sum">
     <div class="sum-head"><span class="sum-name">${esc(brand)}</span><span class="sum-lbl">ROAS</span></div>
-    <div class="sum-roas"><b>${noRev ? "—" : roasF(st.roas)}</b>${noRev ? `<span class="meter-sub">Shopify bağlı değil</span>`
+    <div class="sum-roas"><b>${noRev ? "—" : roasF(st.roas)}</b>${noRev ? `<span class="meter-sub">${noShop ? "Shopify bağlı değil" : missingNote(st)}</span>`
       : prevRoas ? `<span class="meter-sub">${delta(roasFull, prevRoas)} ${cmp}</span>` : ""}</div>
     <dl class="sum-kv">
-      ${kv("Ciro", noRev ? "—" : money(st.rev), noRev ? "" : t && t.revenue ? "hedefin " + pctF(st.rev / t.revenue) + "'i" : delta(st.revFull, st.prevRev))}
+      ${kv("Ciro", noRev ? "—" : money(st.rev), noRev ? "" : st.missing ? missingNote(st) : t && t.revenue ? "hedefin " + pctF(st.rev / t.revenue) + "'i" : delta(st.revFull, st.prevRev))}
       ${kv("Sipariş", noRev ? "—" : num(st.ord), noRev ? "" : t && t.orders ? "hedefin " + pctF(st.ord / t.orders) + "'i" : delta(st.ordFull, st.prevOrd))}
       ${kv("Harcama", money(st.spend), ch === "d2c" ? `Meta ${money(st.meta)} · Google ${DATA.d2c[brand].googleSpend ? money(st.google) : "—"}` : delta(st.spendFull, st.prevSpend))}
       ${kv(st.isCur ? "Ay sonu tahmini" : "Ay toplamı", noRev ? "—" : money(st.isCur ? st.projRev : st.rev), noRev ? "" : st.isCur ? `${st.done} / ${st.n} gün tamam` : "")}
@@ -342,6 +341,7 @@ function card(brand){
   return `<article class="card" style="--st:var(${sts.col})" data-brand="${esc(brand)}">
     <div class="card-head"><span class="card-name">${esc(brand)}</span><span class="status">${sts.txt}</span></div>
     ${noRev ? `<p class="empty">Ciro ve sipariş Shopify bağlanınca görünür; harcama ${money(st.spend)}.</p>` :
+      (st.missing ? `<p class="empty">${missingNote(st)} — hedef kıyası eksik veriyle yapılıyor.</p>` : "") +
       meter("Ciro", st.rev, t.revenue, expect, money) + meter("Sipariş", st.ord, t.orders, expect, num)}
     ${noRev ? "" : `<dl class="facts">
       <div><dt>Ay sonu tahmini</dt><dd>${money(st.projRev)}<small>${t.revenue && st.projRev !== null ? "hedefin " + pctF(st.projRev / t.revenue) + "'i" : st.isCur ? "dünkü ortalamayla" : "kapanış"}</small></dd></div>
@@ -451,7 +451,7 @@ function renderCharts(){
   const decimal = v => f2.format(v);
 
   box.innerHTML = (noRev ? "" :
-      chartBox("c-cum", "Kümülatif ciro", (t && t.revenue ? "gerçekleşen · hedef çizgisi · ay sonu tahmini" : "gerçekleşen") + (hasPrev ? ` · ${pmName}` : "")) +
+      chartBox("c-cum", "Kümülatif ciro", st.missing ? missingNote(st) : (t && t.revenue ? "gerçekleşen · hedef çizgisi · ay sonu tahmini" : "gerçekleşen") + (hasPrev ? ` · ${pmName}` : "")) +
       chartBox("c-daily", "Günlük ciro", sub(t && t.revenue))) +
     chartBox("c-spend", "Günlük harcama", (ch === "d2c" ? "Meta + Google yığılı" : `çubuk: ${monthName(month)}`) + (hasPrev ? ` · çizgi: ${pmName} aynı gün` : "")) +
     (noRev ? "" : chartBox("c-ord", "Günlük sipariş", sub(t && t.orders)));
@@ -461,14 +461,15 @@ function renderCharts(){
   if (!noRev){
     // Kümülatif: gerçekleşen (bugün dahil), hedefe giden doğrusal çizgi, dünkü ortalamayla tahmin.
     let run = 0; const cum = Array(n).fill(null);
-    idx.forEach(i => { run += s.revenue[i]; cum[+DAYS[i].slice(8) - 1] = run; });
+    idx.forEach(i => { if (s.revenue[i] !== null){ run += s.revenue[i]; cum[+DAYS[i].slice(8) - 1] = run; } });
     const ds = [{label: "Gerçekleşen", data: cum, borderColor: A, backgroundColor: A + "22", fill: true, pointRadius: 0, borderWidth: 2.5, tension: .2, fmt: money}];
     if (t && t.revenue) ds.push({label: "Hedef", data: labels.map((_, k) => t.revenue * (k + 1) / n), borderColor: M, borderDash: [6, 5], pointRadius: 0, borderWidth: 1.5, fmt: money});
     if (st.isCur && st.done){
       const rate = st.revFull / st.done;
       ds.push({label: "Tahmin", data: labels.map((_, k) => k + 1 < st.done ? null : st.revFull + rate * (k + 1 - st.done)), borderColor: C, borderDash: [2, 4], pointRadius: 0, borderWidth: 2, fmt: money});
     }
-    if (hasPrev){
+    // Geçen ayın kümülatifi yalnız ayın tamamı varsa: yarım ay baştan başlamış gibi görünmesin.
+    if (hasPrev && byDay(pm, "revenue").slice(0, dim(pm)).every(v => v !== null)){
       let r2 = 0; ds.push({label: pmName, data: byDay(pm, "revenue").map(v => v === null ? null : (r2 += v)), borderColor: B, pointRadius: 0, borderWidth: 1.5, tension: .2, fmt: money});
     }
     mk("c-cum", {type: "line", data: {labels, datasets: ds}, options: baseOpts()});
@@ -512,7 +513,8 @@ function renderTable(){
 }
 
 /* ---------- çatı ---------- */
-const months = [...new Set(DAYS.map(d => d.slice(0, 7)))].reverse();
+// Son 3 ay; pencerenin en eski ayı yalnız karşılaştırma için tutuluyor.
+const months = [...new Set(DAYS.map(d => d.slice(0, 7)))].reverse().slice(0, 3);
 document.getElementById("months").innerHTML = months.map(m => `<button type="button" data-m="${m}">${monthName(m)}</button>`).join("");
 document.getElementById("months").addEventListener("click", e => { const b = e.target.closest("[data-m]"); if (b){ month = b.dataset.m; render(); } });
 document.getElementById("tabs").addEventListener("click", e => { const b = e.target.closest("[data-ch]"); if (b){ ch = b.dataset.ch; brandSel = null; render(); } });

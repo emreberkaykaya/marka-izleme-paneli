@@ -7,9 +7,14 @@ hedef takibi ve günlük grafikler için GÜN GÜN seri istiyor. Kaynaklar aynı
 - D2C: Meta (web hesabı) + Google Ads (betiğin Sheet sekmesi) harcaması,
   Shopify sipariş ve cirosu
 
-Günler Europe/Istanbul takvimine göre. Pencere geçen ayın ilk gününden bugüne
-(bugün dahil, yarım gün); Shopify token'ı yalnız son 60 günü okuyabildiği
-için pencere en fazla 59 gün geriye gider.
+Günler Europe/Istanbul takvimine göre. Panel son 3 ayı gösterir ve her ayı bir
+önceki ayla karşılaştırır, bu yüzden pencere 3 ay önceki ayın ilk gününden
+bugüne (bugün dahil, yarım gün) uzanır.
+
+Shopify token'ı (read_orders) yalnız son 60 günü okuyabiliyor. Daha eski günler
+Sheet'teki "Shopify Günlük" sekmesinde biriken kayıttan gelir: her çalışma son
+59 günü canlı çekip o sekmeye yazar, yani bir gün 60 günü geçince değeri
+kaybolmaz, son çekildiği hâliyle kalır. Hiç kaydı olmayan gün None'dır (0 değil).
 
 Hedefler Sheet'teki "Hedefler" sekmesinden okunur (panel, Apps Script
 üzerinden oraya yazar) — derlenen sayfa en son kaydedilen hedeflerle açılır.
@@ -28,6 +33,9 @@ from sync import (AD_ACCOUNTS, D2C_META_ACCOUNTS, D2C_SHOPIFY_ENV_VARS, GRAPH_AP
                   ISTANBUL, SHOPIFY_API_VERSION, _find_action_value)
 
 SHOPIFY_MAX_DAYS = 59
+SHOPIFY_CACHE_TAB = "Shopify Günlük"
+SHOPIFY_CACHE_HEADER = ["Tarih", "Marka", "Ciro", "Sipariş", "Güncelleme"]
+MONTHS_BACK = 3  # gösterilen en eski ayın da bir önceki ayı
 TARGETS_TAB = "Hedefler"
 TARGETS_HEADER = ["Ay", "Kanal", "Marka", "Ciro Hedefi", "Sipariş Hedefi", "Güncelleme"]
 
@@ -35,8 +43,10 @@ TARGETS_HEADER = ["Ay", "Kanal", "Marka", "Ciro Hedefi", "Sipariş Hedefi", "Gü
 def window():
     """[ilk gün, bugün] — ikisi de dahil, İstanbul takvimi."""
     today = datetime.now(ISTANBUL).date()
-    prev_month_start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
-    return max(prev_month_start, today - timedelta(days=SHOPIFY_MAX_DAYS)), today
+    first = today.replace(day=1)
+    for _ in range(MONTHS_BACK):
+        first = (first - timedelta(days=1)).replace(day=1)
+    return first, today
 
 
 def day_list(first, last):
@@ -127,6 +137,7 @@ def d2c_series(spreadsheet, days, first, last):
     """{marka: {metaSpend, googleSpend|None, revenue|None, orders|None, clicks, impressions}}
     None = o kaynak bağlı değil (0 ile karışmasın)."""
     out = {}
+    cache = read_shopify_cache(spreadsheet)
     for brand, account in D2C_META_ACCOUNTS.items():
         print(f"D2C günlük: {brand}")
         token = sync.resolve_d2c_meta_token(brand, account)
@@ -149,14 +160,47 @@ def d2c_series(spreadsheet, days, first, last):
             print(f"  HATA (Shopify token): {brand}: {exc.response.text[:200]}", file=sys.stderr)
             shop_token = None
         if shop_token:
-            daily = shopify_daily(shop, shop_token, first, last)
-            s["revenue"] = [round(daily[d][0], 2) if d in daily else 0.0 for d in days]
-            s["orders"] = [daily[d][1] if d in daily else 0 for d in days]
+            stamp = datetime.now(ISTANBUL).strftime("%Y-%m-%d %H:%M")
+            live_first = max(first, last - timedelta(days=SHOPIFY_MAX_DAYS))
+            live = shopify_daily(shop, shop_token, live_first, last)
+            # Canlı penceredeki her gün kayda girer — siparişsiz gün 0 olarak.
+            for d in day_list(live_first, last):
+                cache[(d, brand)] = (round(live[d][0], 2), live[d][1], stamp) if d in live else (0.0, 0, stamp)
+            s["revenue"] = [cache[(d, brand)][0] if (d, brand) in cache else None for d in days]
+            s["orders"] = [cache[(d, brand)][1] if (d, brand) in cache else None for d in days]
         else:
             print(f"  UYARI: {brand} için Shopify erişimi yok; ciro boş.", file=sys.stderr)
             s["revenue"] = s["orders"] = None
         out[brand] = s
+    write_shopify_cache(spreadsheet, cache)
     return out
+
+
+def read_shopify_cache(spreadsheet):
+    """{(gün, marka): (ciro, sipariş, son çekiliş)} — sekme yoksa boş."""
+    try:
+        ws = spreadsheet.worksheet(SHOPIFY_CACHE_TAB)
+    except gspread.WorksheetNotFound:
+        return {}
+    out = {}
+    for row in ws.get_all_values(value_render_option="UNFORMATTED_VALUE")[1:]:
+        if len(row) >= 4 and str(row[0]).strip():
+            stamp = str(row[4]) if len(row) > 4 else ""
+            out[(str(row[0]).strip(), str(row[1]).strip())] = (float(row[2] or 0), int(row[3] or 0), stamp)
+    return out
+
+
+def write_shopify_cache(spreadsheet, cache) -> None:
+    if not cache:
+        return
+    try:
+        ws = spreadsheet.worksheet(SHOPIFY_CACHE_TAB)
+    except gspread.WorksheetNotFound:
+        ws = spreadsheet.add_worksheet(title=SHOPIFY_CACHE_TAB, rows=2000, cols=len(SHOPIFY_CACHE_HEADER))
+    rows = [SHOPIFY_CACHE_HEADER] + [[d, b, rev, n, st] for (d, b), (rev, n, st) in sorted(cache.items())]
+    if ws.row_count < len(rows):
+        ws.resize(rows=len(rows) + 500)
+    ws.update(range_name="A1", values=rows, value_input_option="RAW")
 
 
 def read_targets(spreadsheet):
